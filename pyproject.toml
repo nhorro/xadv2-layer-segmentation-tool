@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xadv2-layer-segmentation-tool"
+version = "0.1.0"
+description = "SAM-assisted multilayer background authoring for XADV2"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "Pillow",
+  "PyYAML",
+  "torch",
+  "torchvision",
+]
+
+[project.scripts]
+layer-segmentation = "layer_segmentation.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["layer_segmentation*"]
+exclude = ["sam2*", "tests*"]
