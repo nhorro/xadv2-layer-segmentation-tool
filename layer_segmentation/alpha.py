@@ -4,6 +4,34 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 
+def clip_to_box(
+    values: np.ndarray,
+    box: np.ndarray | list[float] | tuple[float, float, float, float] | None,
+) -> np.ndarray:
+    """Return a copy with every pixel outside the image-space box cleared.
+
+    Box coordinates use the canvas convention ``[x0, y0, x1, y1)``. Fractional
+    edges retain pixels touched by the selected region via floor/ceil clipping.
+    """
+    source = np.asarray(values)
+    if box is None:
+        return source.copy()
+    if source.ndim < 2:
+        raise ValueError("values must have at least two dimensions")
+
+    height, width = source.shape[:2]
+    x0, y0, x1, y1 = (float(value) for value in box)
+    left = max(0, min(width, int(np.floor(min(x0, x1)))))
+    top = max(0, min(height, int(np.floor(min(y0, y1)))))
+    right = max(0, min(width, int(np.ceil(max(x0, x1)))))
+    bottom = max(0, min(height, int(np.ceil(max(y0, y1)))))
+
+    clipped = np.zeros_like(source)
+    if right > left and bottom > top:
+        clipped[top:bottom, left:right] = source[top:bottom, left:right]
+    return clipped
+
+
 def compose_alpha(
     sam_mask: np.ndarray | None,
     manual_alpha: np.ndarray | None,
@@ -90,10 +118,10 @@ def paint_alpha_disk(
         raise ValueError("manual_alpha and base_alpha must have the same shape")
 
     height, width = base_alpha.shape
-    radius = max(1, int(radius))
+    radius = max(0, int(radius))
     feather_px = max(0.0, min(float(radius), float(feather_px)))
     target_alpha = max(0, min(255, int(target_alpha)))
-    cx, cy = int(round(x)), int(round(y))
+    cx, cy = int(np.floor(x)), int(np.floor(y))
     x0, x1 = max(0, cx - radius), min(width, cx + radius + 1)
     y0, y1 = max(0, cy - radius), min(height, cy + radius + 1)
 

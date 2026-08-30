@@ -108,6 +108,9 @@ other
 
 **LS-F-22.** Actualizar la segmentación al modificarlo.
 
+**LS-F-23.** El bounding box es un límite duro: máscaras y derivados deben ser
+transparentes fuera de la región seleccionada, incluso después de feathering.
+
 ## 5.4. SAM prompts
 
 **LS-F-30.** Click positivo para foreground.
@@ -129,6 +132,8 @@ other
 **LS-F-41.** Restauración de alpha.
 
 **LS-F-42.** Ajuste de tamaño del pincel.
+
+Radio `0` representa exactamente un píxel del canvas fuente.
 
 **LS-F-43.** Los retoques manuales deben persistir separadamente de la máscara SAM.
 

@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .project import BackgroundProject, ProjectError, slugify
+from .theme import apply_dark_theme
 
 
 IMAGE_TYPES = (
@@ -32,6 +33,7 @@ class WorkspaceApp(tk.Tk):
         default_model: str = "small",
     ):
         super().__init__()
+        apply_dark_theme(self)
         self.title("XADV2 Layer Segmentation")
         self.geometry("920x260")
         self.minsize(720, 220)

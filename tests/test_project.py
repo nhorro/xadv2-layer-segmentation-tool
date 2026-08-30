@@ -10,6 +10,36 @@ from layer_segmentation.project import BackgroundProject, LayerState
 
 
 class ProjectTests(unittest.TestCase):
+    def test_box_is_a_hard_boundary_for_loaded_masks_manual_alpha_and_feather(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "input.png"
+            rgb = np.zeros((10, 12, 3), dtype=np.uint8)
+            Image.fromarray(rgb, mode="RGB").save(source)
+            project = BackgroundProject.create(root / "scene", source)
+            manual = np.full((10, 12), -1, dtype=np.int16)
+            manual[0, 0] = 255
+            layer = LayerState(
+                name="boxed",
+                box=np.array([3.2, 2.2, 8.1, 7.1], dtype=np.float32),
+                base_mask=np.ones((10, 12), dtype=bool),
+                manual_alpha=manual,
+                feather_px=2,
+            )
+            project.layers.append(layer)
+            project.save()
+
+            # Simulate a historical SAM artifact containing distant islands.
+            Image.fromarray(np.full((10, 12), 255, dtype=np.uint8), mode="L").save(
+                project.root / "layers" / "boxed" / "sam-mask.png"
+            )
+            loaded = BackgroundProject.load(project.root)
+            alpha = loaded.final_alpha(loaded.layers[0])
+            permitted = np.zeros((10, 12), dtype=bool)
+            permitted[2:8, 3:9] = True
+            self.assertFalse(np.any(alpha[~permitted]))
+            self.assertFalse(np.any(loaded.layers[0].base_mask[~permitted]))
+
     def test_create_can_adopt_a_nonempty_scene_directory_without_overwriting(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

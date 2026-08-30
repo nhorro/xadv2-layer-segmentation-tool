@@ -5,6 +5,8 @@ RGBA layers for XADV2 point-and-click scenes. SAM 2.1 supplies initial masks;
 the application preserves prompts, manual alpha corrections, intermediate
 masks, crops, and runtime exports in a scene project.
 
+![Screenshot](./doc/assets/screenshot.png)
+
 All maintained application code lives in `layer_segmentation/`. A workspace is
 a directory containing one project per scene.
 
@@ -50,10 +52,14 @@ Inside the editor:
 
 1. Add a uniquely named layer such as `desk`, then assign its role and z order.
 2. Draw a bounding box and refine the SAM mask with positive and negative points.
+   The box is a hard boundary: SAM output, saved masks, manual alpha, and final
+   feathered artifacts are always transparent outside it.
 3. Zoom and pan for detail work. The toolbar reports source pixel coordinates in
    real time.
-4. Use alpha erase/restore with an exact brush size and a configurable feather
-   width. Partial alpha is stored separately from the SAM mask.
+4. Use alpha erase/paint with an exact brush radius and a configurable feather
+   width. Radius `0` affects exactly one source pixel; larger radii show their
+   outer footprint and fully affected inner region while hovering. Partial alpha
+   is stored separately from the SAM mask.
 5. Optionally apply reversible per-layer erosion and final-edge feathering.
 6. Use **Generate layer artifacts** to materialize the selected layer's final
    mask, full-canvas RGBA, and cropped PNG.
@@ -73,6 +79,12 @@ Changes autosave after a short delay; `Ctrl+S` saves immediately.
 - `B`, `F`, `N`, `E`, `R`: box, positive, negative, erase, restore modes
 - Right-click: negative SAM point while using a point mode
 - `Ctrl+Z`: remove the last SAM point
+
+SAM positive/negative prompts are single coordinates, so their hover cursor is a
+fixed crosshair and one-pixel cell at high zoom; the region changed by SAM is
+model-determined and has no brush radius or feather. Radius and feather apply to
+the manual **Erase α** and **Paint α** modes, whose hover rings match the pixels
+modified by clicking or dragging.
 
 Zoom ranges up to 1600%. High zoom renders only the visible source tile, keeping
 memory use bounded while exposing individual pixels.

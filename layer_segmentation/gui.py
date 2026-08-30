@@ -26,7 +26,8 @@ from .project import (
     LayerState as Layer,
     slugify,
 )
-from .alpha import compose_alpha, paint_alpha_disk
+from .alpha import clip_to_box, compose_alpha, paint_alpha_disk
+from .theme import DARK_COLORS, apply_dark_theme
 
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -88,10 +89,10 @@ def load_predictor(
 class LayerExtractorApp:
     MODES = (
         ("Box", "box"),
-        ("Foreground +", "positive"),
-        ("Background -", "negative"),
-        ("Erase α", "erase"),
-        ("Restore α", "restore"),
+        ("SAM foreground point +", "positive"),
+        ("SAM background point −", "negative"),
+        ("Erase α −", "erase"),
+        ("Paint α +", "restore"),
     )
 
     def __init__(
@@ -101,6 +102,7 @@ class LayerExtractorApp:
         device: str,
     ):
         self.root = root
+        apply_dark_theme(self.root)
         self.project = project
         self.image_path = project.source_image
         self.model_name = project.model
@@ -163,11 +165,14 @@ class LayerExtractorApp:
         self.temp_box_item = None
         self.brushing = False
         self.last_brush_image: tuple[float, float] | None = None
+        self.pointer_image: tuple[float, float] | None = None
         self.space_down = False
         self._render_job: str | None = None
         self._save_job: str | None = None
 
         self._build_ui()
+        self.brush_size.trace_add("write", self.on_brush_settings_changed)
+        self.brush_feather.trace_add("write", self.on_brush_settings_changed)
         self.refresh_layer_list()
         if self.layers:
             self.layer_list.selection_set(0)
@@ -223,6 +228,13 @@ class LayerExtractorApp:
             left,
             width=28,
             exportselection=False,
+            background=DARK_COLORS["field"],
+            foreground=DARK_COLORS["foreground"],
+            selectbackground=DARK_COLORS["selection"],
+            selectforeground=DARK_COLORS["foreground"],
+            highlightbackground=DARK_COLORS["border"],
+            highlightcolor=DARK_COLORS["accent"],
+            borderwidth=0,
         )
         self.layer_list.grid(
             row=2,
@@ -280,7 +292,7 @@ class LayerExtractorApp:
                 text=text,
                 value=value,
                 variable=self.mode,
-                command=self.render,
+                command=self.on_mode_changed,
             ).grid(
                 row=row,
                 column=0,
@@ -298,12 +310,12 @@ class LayerExtractorApp:
         )
         row += 1
 
-        ttk.Label(left, text="Brush size").grid(
+        ttk.Label(left, text="Brush radius").grid(
             row=row, column=0, sticky="w"
         )
         ttk.Spinbox(
             left,
-            from_=1,
+            from_=0,
             to=200,
             increment=1,
             textvariable=self.brush_size,
@@ -323,6 +335,13 @@ class LayerExtractorApp:
             increment=0.25,
             textvariable=self.brush_feather,
         ).grid(row=row, column=1, columnspan=2, sticky="ew")
+        row += 1
+
+        ttk.Label(
+            left,
+            text="Radius/feather apply to α brushes. SAM prompts are one coordinate.",
+            wraplength=210,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 4))
         row += 1
 
         ttk.Label(left, text="Preview").grid(
@@ -509,7 +528,7 @@ class LayerExtractorApp:
 
         self.canvas = tk.Canvas(
             center,
-            background="#202020",
+            background=DARK_COLORS["field"],
             highlightthickness=0,
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
@@ -560,7 +579,7 @@ class LayerExtractorApp:
         self.zoom_label = ttk.Label(toolbar, text="100%")
         self.zoom_label.pack(side="left", padx=10)
 
-        ttk.Label(toolbar, textvariable=self.pointer_var, width=20).pack(side="left", padx=4)
+        ttk.Label(toolbar, textvariable=self.pointer_var, width=42).pack(side="left", padx=4)
 
         ttk.Button(
             toolbar,
@@ -838,7 +857,7 @@ class LayerExtractorApp:
 
         best = int(np.argmax(scores))
 
-        layer.base_mask = masks[best]
+        layer.base_mask = clip_to_box(masks[best], layer.box)
         layer.mask_input = logits[best:best + 1]
         layer.score = float(scores[best])
 
@@ -879,7 +898,7 @@ class LayerExtractorApp:
                 multimask_output=False,
             )
 
-        layer.base_mask = masks[0]
+        layer.base_mask = clip_to_box(masks[0], layer.box)
         layer.mask_input = logits
         layer.score = float(scores[0])
 
@@ -922,7 +941,7 @@ class LayerExtractorApp:
                 multimask_output=False,
             )
 
-        layer.base_mask = masks[0]
+        layer.base_mask = clip_to_box(masks[0], layer.box)
         layer.mask_input = logits[0:1]
         layer.score = float(scores[0])
 
@@ -998,33 +1017,125 @@ class LayerExtractorApp:
 
     def on_pointer_motion(self, event):
         x, y = self.canvas_to_image(event)
-        self.canvas.delete("brush-cursor")
         if 0 <= x < self.image_w and 0 <= y < self.image_h:
-            self.pointer_var.set(f"x: {int(x):4d}  y: {int(y):4d}")
-            if self.mode.get() in ("erase", "restore"):
-                try:
-                    brush_size = max(1.0, float(self.brush_size.get()))
-                    feather = min(brush_size, float(self.brush_feather.get()))
-                except (tk.TclError, ValueError):
-                    brush_size, feather = 1.0, 0.0
-                radius = brush_size * self.zoom
-                sx, sy = x * self.zoom, y * self.zoom
-                self.canvas.create_oval(
-                    sx - radius, sy - radius, sx + radius, sy + radius,
-                    outline="white", width=1, tags="brush-cursor",
-                )
-                inner = max(0.0, brush_size - feather) * self.zoom
-                if inner > 0:
-                    self.canvas.create_oval(
-                        sx - inner, sy - inner, sx + inner, sy + inner,
-                        outline="#80d8ff", dash=(3, 2), width=1, tags="brush-cursor",
-                    )
+            self.pointer_image = (x, y)
         else:
-            self.pointer_var.set("x: —  y: —")
+            self.pointer_image = None
+        self.update_pointer_feedback()
+        self.draw_hover_cursor()
 
     def on_pointer_leave(self, _event=None):
+        self.pointer_image = None
         self.pointer_var.set("x: —  y: —")
         self.canvas.delete("brush-cursor")
+
+    def brush_geometry(self) -> tuple[float, float]:
+        try:
+            radius = max(0.0, float(self.brush_size.get()))
+            feather = max(0.0, min(radius, float(self.brush_feather.get())))
+        except (tk.TclError, ValueError):
+            return 0.0, 0.0
+        return radius, feather
+
+    def update_pointer_feedback(self):
+        if self.pointer_image is None:
+            self.pointer_var.set("x: —  y: —")
+            return
+        x, y = self.pointer_image
+        mode = self.mode.get()
+        if mode in ("positive", "negative"):
+            sign = "+" if mode == "positive" else "−"
+            self.pointer_var.set(
+                f"x: {int(x):4d}  y: {int(y):4d}  SAM {sign} (single point)"
+            )
+        elif mode in ("erase", "restore"):
+            radius, feather = self.brush_geometry()
+            action = "erase" if mode == "erase" else "paint"
+            self.pointer_var.set(
+                f"x: {int(x):4d}  y: {int(y):4d}  {action} r={radius:g} f={feather:g}"
+            )
+        else:
+            self.pointer_var.set(f"x: {int(x):4d}  y: {int(y):4d}")
+
+    def on_brush_settings_changed(self, *_args):
+        self.update_pointer_feedback()
+        self.draw_hover_cursor()
+
+    def on_mode_changed(self):
+        self.update_pointer_feedback()
+        self.draw_hover_cursor()
+
+    def draw_hover_cursor(self):
+        self.canvas.delete("brush-cursor")
+        if self.pointer_image is None:
+            return
+        x, y = self.pointer_image
+        if not (0 <= x < self.image_w and 0 <= y < self.image_h):
+            return
+
+        mode = self.mode.get()
+        pixel_x, pixel_y = int(math.floor(x)), int(math.floor(y))
+        center_x = (pixel_x + 0.5) * self.zoom
+        center_y = (pixel_y + 0.5) * self.zoom
+
+        if mode in ("positive", "negative"):
+            color = "#00ff66" if mode == "positive" else "#ff4d4d"
+            arm = 7
+            self.canvas.create_line(
+                center_x - arm, center_y, center_x + arm, center_y,
+                fill=color, width=2, tags="brush-cursor",
+            )
+            self.canvas.create_line(
+                center_x, center_y - arm, center_x, center_y + arm,
+                fill=color, width=2, tags="brush-cursor",
+            )
+            if self.zoom >= 4:
+                self.canvas.create_rectangle(
+                    pixel_x * self.zoom,
+                    pixel_y * self.zoom,
+                    (pixel_x + 1) * self.zoom,
+                    (pixel_y + 1) * self.zoom,
+                    outline=color,
+                    width=1,
+                    tags="brush-cursor",
+                )
+            return
+
+        if mode not in ("erase", "restore"):
+            return
+        radius, feather = self.brush_geometry()
+        if radius == 0:
+            self.canvas.create_rectangle(
+                pixel_x * self.zoom,
+                pixel_y * self.zoom,
+                (pixel_x + 1) * self.zoom,
+                (pixel_y + 1) * self.zoom,
+                outline="white",
+                width=2,
+                tags="brush-cursor",
+            )
+            return
+
+        outer = (radius + 0.5) * self.zoom
+        self.canvas.create_oval(
+            center_x - outer, center_y - outer, center_x + outer, center_y + outer,
+            outline="white", width=2, tags="brush-cursor",
+        )
+        inner_radius = max(0.0, radius - feather)
+        if feather > 0 and inner_radius > 0:
+            inner = (inner_radius + 0.5) * self.zoom
+            self.canvas.create_oval(
+                center_x - inner, center_y - inner, center_x + inner, center_y + inner,
+                outline="#80d8ff", dash=(3, 2), width=1, tags="brush-cursor",
+            )
+        elif feather > 0:
+            self.canvas.create_rectangle(
+                pixel_x * self.zoom,
+                pixel_y * self.zoom,
+                (pixel_x + 1) * self.zoom,
+                (pixel_y + 1) * self.zoom,
+                outline="#80d8ff", dash=(3, 2), width=1, tags="brush-cursor",
+            )
 
     def set_zoom(self, zoom: float, event=None):
         widget_x = event.x if event is not None else self.canvas.winfo_width() / 2
@@ -1172,6 +1283,7 @@ class LayerExtractorApp:
 
         if layer is not None and self.show_annotations.get():
             self.draw_annotations(layer)
+        self.draw_hover_cursor()
 
     def draw_annotations(self, layer: Layer):
         if layer.box is not None:
@@ -1188,7 +1300,9 @@ class LayerExtractorApp:
                 width=2,
             )
 
-        radius = max(3, int(5 * self.zoom))
+        # SAM prompts represent one coordinate, not a source-space radius.
+        # Keep their marker a fixed screen size at every zoom level.
+        radius = 5
 
         for (x, y), label in zip(
             layer.points,
@@ -1206,6 +1320,14 @@ class LayerExtractorApp:
                 sy + radius,
                 outline=color,
                 width=3,
+            )
+            self.canvas.create_line(
+                sx - radius - 2, sy, sx + radius + 2, sy,
+                fill=color, width=1,
+            )
+            self.canvas.create_line(
+                sx, sy - radius - 2, sx, sy + radius + 2,
+                fill=color, width=1,
             )
 
     # ------------------------------------------------------------------
@@ -1417,7 +1539,7 @@ class LayerExtractorApp:
             layer.manual_alpha,
             x,
             y,
-            radius=max(1, int(self.brush_size.get())),
+            radius=int(self.brush_geometry()[0]),
             feather_px=brush_feather,
             target_alpha=0 if mode == "erase" else 255,
         )
@@ -1436,7 +1558,7 @@ class LayerExtractorApp:
             self.apply_brush(layer, *end, mode, render=False)
             return
         distance = math.dist(start, end)
-        spacing = max(1.0, float(self.brush_size.get()) * 0.35)
+        spacing = max(1.0, self.brush_geometry()[0] * 0.35)
         samples = max(1, int(math.ceil(distance / spacing)))
         for index in range(1, samples + 1):
             amount = index / samples
@@ -1468,6 +1590,7 @@ class LayerExtractorApp:
             event.y,
             gain=1,
         )
+        self.on_pointer_motion(event)
         self.queue_render()
 
     def on_xscroll(self, *args):
@@ -1495,6 +1618,7 @@ class LayerExtractorApp:
         else:
             self.canvas.yview_scroll(direction * 3, "units")
             self.queue_render()
+        self.on_pointer_motion(event)
         return "break"
 
     def on_space_press(self, _event):
@@ -1509,7 +1633,7 @@ class LayerExtractorApp:
         if event.widget.winfo_class() in {"Entry", "TEntry", "Spinbox", "TSpinbox"}:
             return
         self.mode.set(mode)
-        self.render()
+        self.on_mode_changed()
 
     # ------------------------------------------------------------------
     # Export

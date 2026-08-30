@@ -4,6 +4,7 @@ import numpy as np
 
 from layer_segmentation.alpha import (
     apply_edge_cleanup,
+    clip_to_box,
     compose_alpha,
     crop_rect,
     paint_alpha_disk,
@@ -11,6 +12,13 @@ from layer_segmentation.alpha import (
 
 
 class AlphaTests(unittest.TestCase):
+    def test_box_clipping_clears_everything_outside_fractional_bounds(self):
+        mask = np.ones((6, 8), dtype=bool)
+        clipped = clip_to_box(mask, [2.2, 1.8, 5.1, 4.2])
+        expected = np.zeros((6, 8), dtype=bool)
+        expected[1:5, 2:6] = True
+        np.testing.assert_array_equal(clipped, expected)
+
     def test_manual_override_is_distinct_from_no_override(self):
         sam = np.array([[True, False], [False, True]])
         manual = np.array([[-1, 255], [0, -1]], dtype=np.int16)
@@ -38,6 +46,13 @@ class AlphaTests(unittest.TestCase):
         self.assertEqual(int(manual[4, 4]), 0)
         self.assertTrue(0 < int(manual[4, 7]) < 255)
         self.assertEqual(int(manual[0, 0]), -1)
+
+    def test_radius_zero_brush_affects_exactly_one_pixel(self):
+        base = np.full((5, 5), 255, dtype=np.uint8)
+        manual = np.full((5, 5), -1, dtype=np.int16)
+        paint_alpha_disk(base, manual, 2.8, 3.2, radius=0, feather_px=10, target_alpha=0)
+        self.assertEqual(int(manual[3, 2]), 0)
+        self.assertEqual(int(np.count_nonzero(manual >= 0)), 1)
 
 
 if __name__ == "__main__":

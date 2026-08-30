@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from .alpha import apply_edge_cleanup, compose_alpha, crop_rect
+from .alpha import apply_edge_cleanup, clip_to_box, compose_alpha, crop_rect
 
 
 PROJECT_VERSION = 1
@@ -185,7 +185,8 @@ class BackgroundProject:
         sam_path = layer_dir / "sam-mask.png"
         if sam_path.is_file():
             with Image.open(sam_path) as sam_image:
-                layer.base_mask = np.asarray(sam_image.convert("L")) > 127
+                loaded_mask = np.asarray(sam_image.convert("L")) > 127
+                layer.base_mask = clip_to_box(loaded_mask, layer.box)
             self._validate_artifact_shape(layer.base_mask, sam_path)
 
         manual_path = layer_dir / "manual-alpha.png"
@@ -272,6 +273,7 @@ class BackgroundProject:
         layer_dir = self.root / "layers" / self.layer_key(layer)
         layer_dir.mkdir(parents=True, exist_ok=True)
         if layer.base_mask is not None:
+            layer.base_mask = clip_to_box(layer.base_mask, layer.box)
             sam_alpha = np.asarray(layer.base_mask).astype(np.uint8) * 255
             Image.fromarray(sam_alpha, mode="L").save(layer_dir / "sam-mask.png")
 
@@ -298,8 +300,13 @@ class BackgroundProject:
 
     def final_alpha(self, layer: LayerState, cleanup: bool = True) -> np.ndarray | None:
         alpha = compose_alpha(layer.base_mask, layer.manual_alpha)
-        if alpha is not None and cleanup:
-            alpha = apply_edge_cleanup(alpha, layer.erode_px, layer.feather_px)
+        if alpha is not None:
+            alpha = clip_to_box(alpha, layer.box)
+            if cleanup:
+                alpha = apply_edge_cleanup(alpha, layer.erode_px, layer.feather_px)
+                # Feathering is allowed to soften the inner edge but never to
+                # expand the hard authoring scope selected by the box.
+                alpha = clip_to_box(alpha, layer.box)
         return alpha
 
     def export_layer(self, layer: LayerState, rgb: np.ndarray) -> Path:
