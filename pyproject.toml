@@ -13,6 +13,8 @@ dependencies = [
   "PyYAML",
   "torch",
   "torchvision",
+  "transformers>=4.39",
+  "kornia>=0.7",
 ]
 
 [project.scripts]

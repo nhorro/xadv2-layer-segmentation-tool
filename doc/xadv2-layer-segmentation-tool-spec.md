@@ -300,7 +300,12 @@ class SegmentationBackend:
     def refine(self, points, labels, previous_state=None): ...
 ```
 
-SAM2 es la primera implementación.
+SAM2 es la primera implementación interactiva. RMBG-2.0 es una implementación
+prompt-free: ejecuta matting sobre el crop delimitado por el box, conserva su
+alpha suave y delega el refinamiento posterior a los pinceles manuales.
+
+La selección se persiste como el par `backend`/`model`. La UI debe habilitar
+points positivos/negativos solamente si el backend declara esa capacidad.
 
 Esto permite evaluar otros modelos sin reescribir la UI.
 
@@ -343,7 +348,7 @@ source:
 
 segmentation:
   backend: sam2
-  model: sam2.1-hiera-small
+  model: small
 
 crop:
   alpha_threshold: 10

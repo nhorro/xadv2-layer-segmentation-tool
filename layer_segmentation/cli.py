@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from .model_catalog import MODEL_BY_KEY, MODEL_ALIASES
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -24,9 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=("tiny", "small", "base_plus", "large"),
+        choices=tuple(MODEL_BY_KEY) + tuple(MODEL_ALIASES),
         default="small",
-        help="SAM2.1 model used for newly created scenes (default: small)",
+        help="segmentation model used for newly created scenes (default: small)",
     )
     return parser
 

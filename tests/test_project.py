@@ -10,6 +10,33 @@ from layer_segmentation.project import BackgroundProject, LayerState
 
 
 class ProjectTests(unittest.TestCase):
+    def test_rmbg_backend_and_soft_model_alpha_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "input.png"
+            Image.fromarray(np.zeros((4, 5, 3), dtype=np.uint8), mode="RGB").save(source)
+            project = BackgroundProject.create(
+                root / "scene",
+                source,
+                backend="rmbg",
+                model="rmbg-2.0",
+            )
+            alpha = np.asarray(
+                [
+                    [0, 32, 64, 128, 255],
+                    [1, 33, 65, 129, 254],
+                    [2, 34, 66, 130, 253],
+                    [3, 35, 67, 131, 252],
+                ],
+                dtype=np.uint8,
+            )
+            project.layers.append(LayerState(name="soft", base_mask=alpha))
+            project.save()
+
+            loaded = BackgroundProject.load(project.root)
+            self.assertEqual((loaded.backend, loaded.model), ("rmbg", "rmbg-2.0"))
+            np.testing.assert_array_equal(loaded.layers[0].base_mask, alpha)
+
     def test_box_is_a_hard_boundary_for_loaded_masks_manual_alpha_and_feather(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -1,14 +1,35 @@
 # XADV2 Layer Segmentation Tool
 
 Desktop authoring application for turning a background image into registered
-RGBA layers for XADV2 point-and-click scenes. SAM 2.1 supplies initial masks;
-the application preserves prompts, manual alpha corrections, intermediate
-masks, crops, and runtime exports in a scene project.
+RGBA layers for XADV2 point-and-click scenes. SAM 2.1 or BRIA RMBG-2.0 supplies
+initial masks; the application preserves prompts, manual alpha corrections,
+intermediate masks, crops, and runtime exports in a scene project.
 
 ![Screenshot](./doc/assets/screenshot.png)
 
 All maintained application code lives in `layer_segmentation/`. A workspace is
 a directory containing one project per scene.
+
+## Segmentation models
+
+Before installing, segmentation models have to be downloaded.
+
+SAM2:
+
+~~~bash
+git clone https://github.com/facebookresearch/sam2.git
+cd checkpoints
+download_ckpts.sh
+~~~
+
+RMBG-2.0 downloads through Hugging Face on first use. Its weights are gated:
+
+1. Review and accept the terms at <https://huggingface.co/briaai/RMBG-2.0>.
+2. Authenticate locally with `hf auth login`.
+3. Select **BRIA RMBG 2.0** in the workspace window and open the scene.
+
+The self-hosted RMBG-2.0 weights are CC BY-NC 4.0. Commercial use requires a
+separate agreement with BRIA; this tool does not grant or manage that license.
 
 ## Setup
 
@@ -37,8 +58,20 @@ python -m layer_segmentation --workspace=./workspace
 
 `--workspace` defaults to `./workspace`. Use a different path to keep the scenes
 for each game or content project isolated. `--device=auto|cuda|cpu` selects the
-SAM inference device, and `--model=tiny|small|base_plus|large` sets the default
-for newly created scenes.
+inference device. `--model` sets the default for newly created scenes; supported
+keys are `sam2-tiny`, `sam2-small`, `sam2-base-plus`, `sam2-large`, and
+`rmbg-2.0`. The original SAM shorthand keys remain accepted.
+
+The model can also be changed before opening a scene in the workspace window,
+or directly in `project.yml`:
+
+```yaml
+segmentation:
+  backend: rmbg
+  model: rmbg-2.0
+```
+
+Use `backend: sam2` with `model: tiny|small|base_plus|large` for SAM 2.1.
 
 ## Workspace workflow
 
@@ -51,15 +84,17 @@ selected and reopened without recomputing their masks.
 Inside the editor:
 
 1. Add a uniquely named layer such as `desk`, then assign its role and z order.
-2. Draw a bounding box and refine the SAM mask with positive and negative points.
-   The box is a hard boundary: SAM output, saved masks, manual alpha, and final
+2. Draw a bounding box. With SAM, refine the mask with positive and negative
+   points. RMBG is prompt-free and computes a soft alpha matte from the boxed
+   crop, so refine it with the manual alpha brushes instead. The box is a hard
+   boundary: model output, saved masks, manual alpha, and final
    feathered artifacts are always transparent outside it.
 3. Zoom and pan for detail work. The toolbar reports source pixel coordinates in
    real time.
 4. Use alpha erase/paint with an exact brush radius and a configurable feather
    width. Radius `0` affects exactly one source pixel; larger radii show their
    outer footprint and fully affected inner region while hovering. Partial alpha
-   is stored separately from the SAM mask.
+   is stored separately from the model mask.
 5. Optionally apply reversible per-layer erosion and final-edge feathering.
 6. Use **Generate layer artifacts** to materialize the selected layer's final
    mask, full-canvas RGBA, and cropped PNG.
@@ -111,8 +146,8 @@ memory use bounded while exposing individual pixels.
 ```
 
 `manual-alpha.png` is an LA PNG. Its luminance stores the override value and its
-alpha channel distinguishes an override from “use the SAM mask.” Recomputing SAM
-therefore does not destroy hand-painted corrections.
+alpha channel distinguishes an override from “use the model mask.” Recomputing
+the selected model therefore does not destroy hand-painted corrections.
 
 `export/base.png` is an RGBA base with fully opaque extracted-layer coverage
 removed from its alpha channel. Source pixels remain beneath partially transparent

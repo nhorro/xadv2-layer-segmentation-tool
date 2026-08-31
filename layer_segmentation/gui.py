@@ -3,22 +3,11 @@
 from __future__ import annotations
 
 import math
-import sys
 import tkinter as tk
-from contextlib import nullcontext
-from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 import numpy as np
-import torch
 from PIL import Image, ImageTk
-
-ROOM_TEST_ROOT = Path(__file__).resolve().parents[1]
-SAM2_REPO = ROOM_TEST_ROOT / "sam2"
-if str(ROOM_TEST_ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOM_TEST_ROOT))
-if str(SAM2_REPO) not in sys.path:
-    sys.path.insert(0, str(SAM2_REPO))
 
 from .project import (
     ROLES,
@@ -27,59 +16,9 @@ from .project import (
     slugify,
 )
 from .alpha import clip_to_box, compose_alpha, paint_alpha_disk
+from .model_catalog import model_from_config
+from .segmentation import load_segmenter
 from .theme import DARK_COLORS, apply_dark_theme
-
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-
-# -----------------------------------------------------------------------------
-# Project layout / models
-# -----------------------------------------------------------------------------
-
-MODEL_PRESETS = {
-    "tiny": {
-        "config": "configs/sam2.1/sam2.1_hiera_t.yaml",
-        "checkpoint": SAM2_REPO / "checkpoints" / "sam2.1_hiera_tiny.pt",
-    },
-    "small": {
-        "config": "configs/sam2.1/sam2.1_hiera_s.yaml",
-        "checkpoint": SAM2_REPO / "checkpoints" / "sam2.1_hiera_small.pt",
-    },
-    "base_plus": {
-        "config": "configs/sam2.1/sam2.1_hiera_b+.yaml",
-        "checkpoint": SAM2_REPO / "checkpoints" / "sam2.1_hiera_base_plus.pt",
-    },
-    "large": {
-        "config": "configs/sam2.1/sam2.1_hiera_l.yaml",
-        "checkpoint": SAM2_REPO / "checkpoints" / "sam2.1_hiera_large.pt",
-    },
-}
-
-
-# -----------------------------------------------------------------------------
-# SAM
-# -----------------------------------------------------------------------------
-
-def load_predictor(
-    model_name: str,
-    device: str,
-) -> SAM2ImagePredictor:
-    preset = MODEL_PRESETS[model_name]
-    checkpoint_path = preset["checkpoint"]
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path}"
-        )
-
-    model = build_sam2(
-        preset["config"],
-        str(checkpoint_path),
-        device=device,
-    )
-
-    return SAM2ImagePredictor(model)
 
 
 # -----------------------------------------------------------------------------
@@ -105,7 +44,7 @@ class LayerExtractorApp:
         apply_dark_theme(self.root)
         self.project = project
         self.image_path = project.source_image
-        self.model_name = project.model
+        self.model_spec = model_from_config(project.backend, project.model)
         self.device = device
 
         self.root.title(f"XADV2 Layer Segmentation — {project.name}")
@@ -113,7 +52,7 @@ class LayerExtractorApp:
 
         # Image
         self.image_pil = Image.open(self.image_path).convert("RGB")
-        self.image_np = np.asarray(self.image_pil)
+        self.image_np = np.asarray(self.image_pil).copy()
         self.image_h, self.image_w = self.image_np.shape[:2]
         yy, xx = np.indices((self.image_h, self.image_w))
         checker = ((xx // 12 + yy // 12) % 2).astype(np.uint8)
@@ -121,22 +60,9 @@ class LayerExtractorApp:
         self.checker_bg = np.repeat(checker_gray[..., None], 3, axis=2)
 
         # Model
-        self.status_var = tk.StringVar(value="Loading SAM2...")
+        self.status_var = tk.StringVar(value=f"Loading {self.model_spec.label}...")
         self.root.update_idletasks()
-
-        self.predictor = load_predictor(
-            self.model_name,
-            device,
-        )
-
-        autocast = (
-            torch.autocast("cuda", dtype=torch.bfloat16)
-            if device == "cuda"
-            else nullcontext()
-        )
-
-        with torch.inference_mode(), autocast:
-            self.predictor.set_image(self.image_np)
+        self.segmenter = load_segmenter(self.model_spec, device, self.image_np)
 
         # State
         self.layers = self.project.layers
@@ -181,7 +107,7 @@ class LayerExtractorApp:
 
         self.status_var.set(
             f"{self.image_path.name} — {self.image_w}×{self.image_h} — "
-            f"{self.model_name} on {self.device}"
+            f"{self.model_spec.label} on {self.device}"
         )
 
         self.root.after(100, self.fit_to_window)
@@ -286,20 +212,27 @@ class LayerExtractorApp:
         ).grid(row=6, column=0, columnspan=3, sticky="w")
 
         row = 7
+        self.mode_buttons = {}
         for text, value in self.MODES:
-            ttk.Radiobutton(
+            button = ttk.Radiobutton(
                 left,
                 text=text,
                 value=value,
                 variable=self.mode,
                 command=self.on_mode_changed,
-            ).grid(
+            )
+            button.grid(
                 row=row,
                 column=0,
                 columnspan=3,
                 sticky="w",
             )
+            self.mode_buttons[value] = button
             row += 1
+
+        if not self.model_spec.supports_points:
+            self.mode_buttons["positive"].configure(state="disabled")
+            self.mode_buttons["negative"].configure(state="disabled")
 
         ttk.Separator(left, orient="horizontal").grid(
             row=row,
@@ -337,9 +270,14 @@ class LayerExtractorApp:
         ).grid(row=row, column=1, columnspan=2, sticky="ew")
         row += 1
 
+        prompt_help = (
+            "Radius/feather apply to α brushes. SAM prompts are one coordinate."
+            if self.model_spec.supports_points
+            else "RMBG runs inside the box without prompts; refine with α brushes."
+        )
         ttk.Label(
             left,
-            text="Radius/feather apply to α brushes. SAM prompts are one coordinate.",
+            text=prompt_help,
             wraplength=210,
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 4))
         row += 1
@@ -444,21 +382,26 @@ class LayerExtractorApp:
         )
         row += 1
 
-        ttk.Button(
+        self.undo_point_button = ttk.Button(
             left,
             text="Undo point",
             command=self.undo_point,
-        ).grid(row=row, column=0, sticky="ew")
-        ttk.Button(
+        )
+        self.undo_point_button.grid(row=row, column=0, sticky="ew")
+        self.clear_points_button = ttk.Button(
             left,
             text="Clear points",
             command=self.clear_points,
-        ).grid(row=row, column=1, columnspan=2, sticky="ew")
+        )
+        self.clear_points_button.grid(row=row, column=1, columnspan=2, sticky="ew")
+        if not self.model_spec.supports_points:
+            self.undo_point_button.configure(state="disabled")
+            self.clear_points_button.configure(state="disabled")
         row += 1
 
         ttk.Button(
             left,
-            text="Recompute SAM mask",
+            text="Recompute model mask",
             command=self.recompute_current_mask,
         ).grid(
             row=row,
@@ -832,124 +775,81 @@ class LayerExtractorApp:
         self.render()
 
     # ------------------------------------------------------------------
-    # SAM inference
+    # Model inference
     # ------------------------------------------------------------------
 
-    def autocast_context(self):
-        if self.device == "cuda":
-            return torch.autocast(
-                "cuda",
-                dtype=torch.bfloat16,
-            )
-        return nullcontext()
+    def _segment_layer(self, layer: Layer, use_points: bool) -> None:
+        if layer.box is None:
+            return
+
+        points = None
+        labels = None
+        state = None
+        if use_points and self.model_spec.supports_points and layer.points:
+            points = np.asarray(layer.points, dtype=np.float32)
+            labels = np.asarray(layer.labels, dtype=np.int32)
+            state = layer.mask_input
+
+        result = self.segmenter.segment(
+            box=layer.box,
+            points=points,
+            labels=labels,
+            state=state,
+        )
+        layer.base_mask = clip_to_box(result.alpha, layer.box)
+        layer.mask_input = result.state
+        layer.score = result.score
+
+        detail = ""
+        if result.score is not None:
+            detail = f", score {result.score:.4f}"
+        if points is not None:
+            detail = f", {len(points)} point(s){detail}"
+        self.set_busy(f"{layer.name}: {self.model_spec.label}{detail}")
+        self.refresh_layer_list()
+        self.render()
+        self.schedule_save()
 
     def predict_initial(self, layer: Layer):
         if layer.box is None:
             return
 
-        self.set_busy("SAM2: initial segmentation...")
-
-        with torch.inference_mode(), self.autocast_context():
-            masks, scores, logits = self.predictor.predict(
-                box=layer.box,
-                multimask_output=True,
-            )
-
-        best = int(np.argmax(scores))
-
-        layer.base_mask = clip_to_box(masks[best], layer.box)
-        layer.mask_input = logits[best:best + 1]
-        layer.score = float(scores[best])
-
-        self.set_busy(
-            f"{layer.name}: score {layer.score:.4f}"
-        )
-        self.refresh_layer_list()
-        self.render()
-        self.schedule_save()
+        self.set_busy(f"{self.model_spec.label}: initial segmentation...")
+        self._segment_layer(layer, use_points=False)
 
     def refine(self, layer: Layer):
         if layer.box is None:
+            return
+
+        if not self.model_spec.supports_points:
+            self.status_var.set(
+                f"{self.model_spec.label} has no point prompts; use erase/paint α."
+            )
             return
 
         if not layer.points:
             self.predict_initial(layer)
             return
 
-        coords = np.asarray(
-            layer.points,
-            dtype=np.float32,
-        )
-        labels = np.asarray(
-            layer.labels,
-            dtype=np.int32,
-        )
-
         self.set_busy(
-            f"SAM2: refining with {len(layer.points)} point(s)..."
+            f"{self.model_spec.label}: refining with {len(layer.points)} point(s)..."
         )
-
-        with torch.inference_mode(), self.autocast_context():
-            masks, scores, logits = self.predictor.predict(
-                point_coords=coords,
-                point_labels=labels,
-                box=layer.box,
-                mask_input=layer.mask_input,
-                multimask_output=False,
-            )
-
-        layer.base_mask = clip_to_box(masks[0], layer.box)
-        layer.mask_input = logits
-        layer.score = float(scores[0])
-
-        self.set_busy(
-            f"{layer.name}: {len(layer.points)} points, "
-            f"score {layer.score:.4f}"
-        )
-        self.render()
-        self.schedule_save()
+        self._segment_layer(layer, use_points=True)
 
     def recompute_layer(self, layer: Layer):
         """
-        Rebuild SAM state after undo/clear. Manual alpha overrides are kept.
+        Rebuild model state after undo/clear. Manual alpha overrides are kept.
         """
         layer.mask_input = None
 
         if layer.box is None:
             return
 
-        if not layer.points:
+        if not layer.points or not self.model_spec.supports_points:
             self.predict_initial(layer)
             return
-
-        coords = np.asarray(
-            layer.points,
-            dtype=np.float32,
-        )
-        labels = np.asarray(
-            layer.labels,
-            dtype=np.int32,
-        )
-
-        self.set_busy("SAM2: recomputing...")
-
-        with torch.inference_mode(), self.autocast_context():
-            masks, scores, logits = self.predictor.predict(
-                point_coords=coords,
-                point_labels=labels,
-                box=layer.box,
-                multimask_output=False,
-            )
-
-        layer.base_mask = clip_to_box(masks[0], layer.box)
-        layer.mask_input = logits[0:1]
-        layer.score = float(scores[0])
-
-        self.set_busy(
-            f"{layer.name}: score {layer.score:.4f}"
-        )
-        self.render()
-        self.schedule_save()
+        self.set_busy(f"{self.model_spec.label}: recomputing...")
+        self._segment_layer(layer, use_points=True)
 
     # ------------------------------------------------------------------
     # Mask composition
@@ -1062,6 +962,14 @@ class LayerExtractorApp:
         self.draw_hover_cursor()
 
     def on_mode_changed(self):
+        if (
+            self.mode.get() in ("positive", "negative")
+            and not self.model_spec.supports_points
+        ):
+            self.mode.set("erase")
+            self.status_var.set(
+                f"{self.model_spec.label} is prompt-free; use erase/paint α to refine."
+            )
         self.update_pointer_feedback()
         self.draw_hover_cursor()
 
@@ -1300,6 +1208,9 @@ class LayerExtractorApp:
                 width=2,
             )
 
+        if not self.model_spec.supports_points:
+            return
+
         # SAM prompts represent one coordinate, not a source-space radius.
         # Keep their marker a fixed screen size at every zoom level.
         radius = 5
@@ -1483,7 +1394,8 @@ class LayerExtractorApp:
             layer.score = None
 
             self.predict_initial(layer)
-            self.mode.set("positive")
+            self.mode.set("positive" if self.model_spec.supports_points else "erase")
+            self.on_mode_changed()
 
         elif mode in ("erase", "restore"):
             self.brushing = False
@@ -1493,7 +1405,7 @@ class LayerExtractorApp:
 
     def on_right_click(self, event):
         layer = self.current_layer()
-        if layer is None:
+        if layer is None or not self.model_spec.supports_points:
             return
 
         # Right click is always a negative SAM point unless brushing.

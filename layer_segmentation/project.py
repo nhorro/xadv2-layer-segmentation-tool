@@ -11,6 +11,7 @@ import yaml
 from PIL import Image
 
 from .alpha import apply_edge_cleanup, clip_to_box, compose_alpha, crop_rect
+from .model_catalog import model_from_config
 
 
 PROJECT_VERSION = 1
@@ -53,6 +54,7 @@ class BackgroundProject:
         source_image: Path,
         width: int,
         height: int,
+        backend: str = "sam2",
         model: str = "small",
         crop_threshold: int = 10,
         crop_margin: int = 2,
@@ -63,6 +65,7 @@ class BackgroundProject:
         self.source_image = source_image.resolve()
         self.width = int(width)
         self.height = int(height)
+        self.backend = backend
         self.model = model
         self.crop_threshold = int(crop_threshold)
         self.crop_margin = int(crop_margin)
@@ -78,8 +81,13 @@ class BackgroundProject:
         root: Path,
         input_image: Path,
         name: str | None = None,
+        backend: str = "sam2",
         model: str = "small",
     ) -> "BackgroundProject":
+        try:
+            model_from_config(backend, model)
+        except ValueError as exc:
+            raise ProjectError(str(exc)) from exc
         root = root.resolve()
         input_image = input_image.resolve()
         if not input_image.is_file():
@@ -108,6 +116,7 @@ class BackgroundProject:
             source_image=canonical,
             width=width,
             height=height,
+            backend=backend,
             model=model,
         )
         project.save()
@@ -130,13 +139,21 @@ class BackgroundProject:
             raise ProjectError(f"Project source image is missing: {source_image}")
 
         crop = data.get("crop", {})
+        segmentation = data.get("segmentation", {})
+        backend = str(segmentation.get("backend", "sam2"))
+        model = str(segmentation.get("model", "small"))
+        try:
+            model_from_config(backend, model)
+        except ValueError as exc:
+            raise ProjectError(str(exc)) from exc
         project = cls(
             root=root,
             name=str(data.get("name") or root.name),
             source_image=source_image,
             width=int(source_data.get("width", 0)),
             height=int(source_data.get("height", 0)),
-            model=str(data.get("segmentation", {}).get("model", "small")),
+            backend=backend,
+            model=model,
             crop_threshold=int(crop.get("alpha_threshold", 10)),
             crop_margin=int(crop.get("margin", 2)),
         )
@@ -185,7 +202,9 @@ class BackgroundProject:
         sam_path = layer_dir / "sam-mask.png"
         if sam_path.is_file():
             with Image.open(sam_path) as sam_image:
-                loaded_mask = np.asarray(sam_image.convert("L")) > 127
+                # SAM masks are binary, while RMBG produces a soft alpha matte.
+                # Keep the grayscale values so either backend round-trips.
+                loaded_mask = np.asarray(sam_image.convert("L"), dtype=np.uint8)
                 layer.base_mask = clip_to_box(loaded_mask, layer.box)
             self._validate_artifact_shape(layer.base_mask, sam_path)
 
@@ -221,11 +240,16 @@ class BackgroundProject:
         if len(keys) != len(set(keys)):
             raise ProjectError("Layer names must remain unique after filename normalization")
 
-    def save(self) -> None:
+    def save(self, save_artifacts: bool = True) -> None:
+        try:
+            model_from_config(self.backend, self.model)
+        except ValueError as exc:
+            raise ProjectError(str(exc)) from exc
         self.validate_unique_names()
         self.project_file.parent.mkdir(parents=True, exist_ok=True)
-        for layer in self.layers:
-            self._save_layer_authoring(layer)
+        if save_artifacts:
+            for layer in self.layers:
+                self._save_layer_authoring(layer)
 
         layers = {}
         for layer in self.layers:
@@ -257,7 +281,7 @@ class BackgroundProject:
                 "width": self.width,
                 "height": self.height,
             },
-            "segmentation": {"backend": "sam2", "model": self.model},
+            "segmentation": {"backend": self.backend, "model": self.model},
             "crop": {
                 "alpha_threshold": self.crop_threshold,
                 "margin": self.crop_margin,
@@ -274,7 +298,7 @@ class BackgroundProject:
         layer_dir.mkdir(parents=True, exist_ok=True)
         if layer.base_mask is not None:
             layer.base_mask = clip_to_box(layer.base_mask, layer.box)
-            sam_alpha = np.asarray(layer.base_mask).astype(np.uint8) * 255
+            sam_alpha = compose_alpha(layer.base_mask, None)
             Image.fromarray(sam_alpha, mode="L").save(layer_dir / "sam-mask.png")
 
         if layer.manual_alpha is not None:
@@ -286,6 +310,7 @@ class BackgroundProject:
 
         session = {
             "name": layer.name,
+            "backend": self.backend,
             "model": self.model,
             "box": layer.box.tolist() if layer.box is not None else None,
             "points": [
@@ -312,7 +337,7 @@ class BackgroundProject:
     def export_layer(self, layer: LayerState, rgb: np.ndarray) -> Path:
         alpha = self.final_alpha(layer)
         if alpha is None:
-            raise ProjectError(f"Layer '{layer.name}' has no SAM mask")
+            raise ProjectError(f"Layer '{layer.name}' has no model mask")
 
         authoring_dir = self.root / "layers" / self.layer_key(layer)
         authoring_dir.mkdir(parents=True, exist_ok=True)
